@@ -1,6 +1,7 @@
 package pubsub
 
 import (
+	"context"
 	"sync"
 )
 
@@ -20,101 +21,99 @@ type Message struct {
 
 type PubSub interface {
 	// Publish the message to all subscribers of msg.Name
-	Publish(msg *Message)
+	Publish(msg Message)
 
-	// Subscribe creates a subscription on the topic `name`. You provide the
-	// channel on which you will listen for Message's and can loop on that waiting for it
-	// to close. You unsubscribe by closing the returned channel. This will in turn
-	// close your `recv` channel so that your listener can exit.
-	// note: You should receive and process as quickly as possible as the entire
-	// PubSub instance is blocked on your channel brokering the message.
-	Subscribe(name string, recv chan<- *Message) (closeChannel chan<- interface{})
+	// Subscribe creates a subscription on the topic `name`. You are responsible
+	// for watching the returned channel until the context is canceled.
+	Subscribe(ctx context.Context, name string) <-chan Message
 
 	// SubscribeAll is like Subscribe, but you will receive all events.
-	SubscribeAll(recv chan<- *Message) (closeChannel chan<- interface{})
+	SubscribeAll(ctx context.Context) <-chan Message
 }
 
 // SubscribeWithCallback provides a convenience helper around PubSub.Subscribe for
 // a callback pattern.
 // note: You still control the lifetime of your callback with the retruned channel instance
-func SubscribeWithCallback(ps PubSub, name string, cb func(*Message)) chan<- interface{} {
-	recv := make(chan *Message)
-	unsub := ps.Subscribe(name, recv)
-
+func SubscribeWithCallback(ctx context.Context, ps PubSub, name string, cb func(Message)) {
 	go func() {
-		for msg := range recv {
+		ch := ps.Subscribe(ctx, name)
+		for msg := range ch {
 			cb(msg)
 		}
 	}()
-
-	return unsub
 }
 
 // SubscribeAllWithCallback is like SubscribeWithCallback, but for all events
-func SubscribeAllWithCallback(ps PubSub, cb func(*Message)) chan<- interface{} {
-	return SubscribeWithCallback(ps, allName, cb)
+func SubscribeAllWithCallback(ctx context.Context, ps PubSub, cb func(Message)) {
+	SubscribeWithCallback(ctx, ps, allName, cb)
 }
 
 // NewPubSub creates a new PubSub instance.
 func NewPubSub() PubSub {
-	return &pubsubImpl{
-		receivers: make(map[string][]chan<- *Message),
+	return &pubSubImpl{
+		subscriptions: make(map[string][]*subscription),
 	}
 }
 
-type pubsubImpl struct {
-	lock      sync.RWMutex
-	receivers map[string][]chan<- *Message
+type subscription struct {
+	ch chan Message
 }
 
-func (ps *pubsubImpl) Publish(msg *Message) {
+type pubSubImpl struct {
+	lock          sync.RWMutex
+	subscriptions map[string][]*subscription
+}
+
+func (ps *pubSubImpl) Publish(msg Message) {
 	ps.lock.RLock()
 	defer ps.lock.RUnlock()
 
 	// Inline message in the lock. This ensures the safety of the channel's lifetime
 	// with being unsubscribed.
-	for _, r := range ps.receivers[msg.Name] {
-		r <- msg
+	for _, s := range ps.subscriptions[msg.Name] {
+		s.ch <- msg
 	}
 
-	for _, r := range ps.receivers[allName] {
-		r <- msg
+	for _, s := range ps.subscriptions[allName] {
+		s.ch <- msg
 	}
 }
 
-func (ps *pubsubImpl) SubscribeAll(recv chan<- *Message) (closeChannel chan<- interface{}) {
-	return ps.Subscribe(allName, recv)
-}
-
-func (ps *pubsubImpl) Subscribe(name string, recv chan<- *Message) chan<- interface{} {
+func (ps *pubSubImpl) Subscribe(ctx context.Context, name string) <-chan Message {
 	ps.lock.Lock()
 	defer ps.lock.Unlock()
 
-	ps.receivers[name] = append(ps.receivers[name], recv)
-	closeChannel := make(chan interface{})
+	sub := &subscription{
+		ch: make(chan Message),
+	}
+	ps.subscriptions[name] = append(ps.subscriptions[name], sub)
 
-	// Wait for subscriber to "unsubscribe"
 	go func() {
-		<-closeChannel
+		// Block until receiver says they are done.
+		<-ctx.Done()
 
-		// Always unblock the receiver
-		defer close(recv)
+		// Mark we are done
+		close(sub.ch)
 
 		// Remove this receiver. This is not a hot path so naive rebuild is OK.
 		ps.lock.Lock()
 		defer ps.lock.Unlock()
 
 		// safety/sanity check
-		if len(ps.receivers[name]) != 0 {
-			newRecievers := make([]chan<- *Message, 0, len(ps.receivers[name])-1)
-			for _, r := range ps.receivers[name] {
-				if r != recv {
-					newRecievers = append(newRecievers, r)
+		if len(ps.subscriptions[name]) != 0 {
+			newSubs := make([]*subscription, 0, len(ps.subscriptions[name])-1)
+			for _, s := range ps.subscriptions[name] {
+				if s != sub {
+					newSubs = append(newSubs, s)
 				}
 			}
-			ps.receivers[name] = newRecievers
+			ps.subscriptions[name] = newSubs
 		}
 	}()
 
-	return closeChannel
+	return sub.ch
+}
+
+func (ps *pubSubImpl) SubscribeAll(ctx context.Context) <-chan Message {
+	return ps.Subscribe(ctx, allName)
 }

@@ -1,27 +1,25 @@
 package pubsub
 
 import (
-	"fmt"
+	"context"
 	"sync"
 	"testing"
 )
 
 func TestSequence(t *testing.T) {
+	ps := NewPubSub()
+
 	var recvWg sync.WaitGroup
 	var unsubWg sync.WaitGroup
 
-	ps := NewPubSub()
-
-	recvPickles := make(chan *Message)
-	unsubPickles := ps.Subscribe("pickles", recvPickles)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	// This is our receiver
 	recvWg.Add(1)
 	unsubWg.Add(1)
 	go func() {
-		// Loop until unsubscribed
-		for msg := range recvPickles {
-			fmt.Printf("recv'd message %+v\n", msg)
+		for msg := range ps.Subscribe(ctx, "pickles") {
+			t.Logf("recv'd message %+v\n", msg)
 
 			if msg.Name != "pickles" {
 				t.Errorf("Wrong name %s", msg.Name)
@@ -33,18 +31,17 @@ func TestSequence(t *testing.T) {
 			recvWg.Done()
 		}
 
-		// Indicate unsubscribe completed
-		fmt.Println("done")
+		t.Logf("done")
 		unsubWg.Done()
 	}()
 
 	// This is some decoupled publisher
 	go func() {
-		msg := &Message{
+		msg := Message{
 			Name:  "pickles",
 			Value: 99,
 		}
-		fmt.Printf("Publishing %+v\n", msg)
+		t.Logf("Publishing %+v\n", msg)
 		ps.Publish(msg)
 	}()
 
@@ -52,22 +49,24 @@ func TestSequence(t *testing.T) {
 	recvWg.Wait()
 
 	// Can tear down the receiver now.
-	close(unsubPickles)
+	cancel()
 	unsubWg.Wait()
 }
 
 func TestAllWithCallback(t *testing.T) {
-	var recvWg sync.WaitGroup
 
+	var recvWg sync.WaitGroup
 	ps := NewPubSub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// This is our receiver
 	recvWg.Add(1)
-	unsubPickles := SubscribeAllWithCallback(ps, func(msg *Message) {
-		fmt.Printf("recv'd message %+v\n", msg)
+	SubscribeAllWithCallback(ctx, ps, func(msg Message) {
+		t.Logf("recv'd message %+v\n", msg)
 
 		if msg.Name != "pickles" {
-			t.Fatalf("Wrong name %s", msg.Name)
+			t.Errorf("Wrong name %s", msg.Name)
 		}
 		v, ok := msg.Value.(int)
 		if !ok || v != 99 {
@@ -78,15 +77,14 @@ func TestAllWithCallback(t *testing.T) {
 
 	// This is some decoupled publisher
 	go func() {
-		msg := &Message{
+		msg := Message{
 			Name:  "pickles",
 			Value: 99,
 		}
-		fmt.Printf("Publishing %+v\n", msg)
+		t.Logf("Publishing %+v\n", msg)
 		ps.Publish(msg)
 	}()
 
 	// Make sure the reciever got his message
 	recvWg.Wait()
-	close(unsubPickles)
 }
