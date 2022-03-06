@@ -10,12 +10,15 @@ Mostly, what I wanted is a way to use the benefits of the pub/sub model in proce
 # Godoc
 
 ```
+package pubsub // import "github.com/cheezypoofs/go-pub-sub"
+
+
 FUNCTIONS
 
-func SubscribeAllWithCallback(ps PubSub, cb func(*Message)) chan<- interface{}
+func SubscribeAllWithCallback(ctx context.Context, ps PubSub, cb func(Message))
     SubscribeAllWithCallback is like SubscribeWithCallback, but for all events
 
-func SubscribeWithCallback(ps PubSub, name string, cb func(*Message)) chan<- interface{}
+func SubscribeWithCallback(ctx context.Context, ps PubSub, name string, cb func(Message))
     SubscribeWithCallback provides a convenience helper around PubSub.Subscribe
     for a callback pattern. note: You still control the lifetime of your
     callback with the retruned channel instance
@@ -32,18 +35,14 @@ type Message struct {
 
 type PubSub interface {
 	// Publish the message to all subscribers of msg.Name
-	Publish(msg *Message)
+	Publish(msg Message)
 
-	// Subscribe creates a subscription on the topic `name`. You provide the
-	// channel on which you will listen for Message's and can loop on that waiting for it
-	// to close. You unsubscribe by closing the returned channel. This will in turn
-	// close your `recv` channel so that your listener can exit.
-	// note: You should receive and process as quickly as possible as the entire
-	// PubSub instance is blocked on your channel brokering the message.
-	Subscribe(name string, recv chan<- *Message) (closeChannel chan<- interface{})
+	// Subscribe creates a subscription on the topic `name`. You are responsible
+	// for watching the returned channel until the context is canceled.
+	Subscribe(ctx context.Context, name string) <-chan Message
 
 	// SubscribeAll is like Subscribe, but you will receive all events.
-	SubscribeAll(recv chan<- *Message) (closeChannel chan<- interface{})
+	SubscribeAll(ctx context.Context) <-chan Message
 }
 
 func NewPubSub() PubSub
